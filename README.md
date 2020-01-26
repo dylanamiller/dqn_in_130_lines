@@ -4,7 +4,9 @@
    "cell_type": "markdown",
    "metadata": {},
    "source": [
-    "In this notebook, I will go through a quick implementation (about 130 lines) of DQN. For starters, DQN, or Deep Q Network, is Q Learning (https://dylanamiller.github.io/) with extra bells and whistles; the main bell and/or whistle being the use of a neural network as the function approximator - interestibly enough doing this for Q Learning has no gaurentee of convergence (see https://www.mit.edu/~jnt/Papers/J063-97-bvr-td.pdf), despite the algorithm's success. Along with this of course, come certain alterations to the Q Learning algorithm that are required in order to make the neural network manageable. But do not let these things obscure what is really going on: Q Learning."
+    "In this notebook, I will go through a quick implementation (about 130 lines) of DQN (https://www.cs.toronto.edu/~vmnih/docs/dqn.pdf). For starters, DQN, or Deep Q Network, is Q Learning (see https://dylanamiller.github.io/ to get spun up on the details) with extra bells and whistles; the main bell and/or whistle being the use of a neural network as the function approximator - interestibly enough, doing this for Q Learning actuall causes the algorithm to have no gaurentee of convergence (https://www.mit.edu/~jnt/Papers/J063-97-bvr-td.pdf) despite the algorithm's success. Along with using a neural network of course, come certain alterations to the Q Learning algorithm that are required in order to make it manageable. But do not let these things obscure what is really going on: Q Learning.\n",
+    "\n",
+    "Note: I will be using Pytorch for this example. I will not however, discuss implementation details involved with using Pytorch."
    ]
   },
   {
@@ -26,6 +28,27 @@
     "import copy\n",
     "\n",
     "import gym"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "To begin, we define a class for the Experience Replay Buffer. This is the fancy name for the user defined data structure that will hold the transition tuples our algorithm will collect as it attempts to navigate the environment. DQN (even though it is really just Q Learning, I will revert to saying DQN as it saves space) is an off-policy algorithm. This means, that the policy being used to define the agent's behavior is not the one we are improving; the reason for this will be apparent in a bit. This means that we do not need to use current, by which I mean from the agent's history within the current update period, experience in order to train our agent. We can instead choose to use experience from the entire history or training. This is what makes off-policy algorithms more sample efficient that on policy algorithms.\n",
+    "\n",
+    "In the __init__() function, we define maxlen, batch_size, and buffer. \n",
+    "\n",
+    ":maxlen defines how many experience (transition tuples of state, action, reward, next_state, next_action) we want to include in our buffer. After the buffer hits this limit, it will start removing data points, starting with the oldest; we may as well leave in the most recent for our agent to use. \n",
+    "\n",
+    ":batch_size determines how many data points we will use for each update.\n",
+    "\n",
+    ":buffer of course stores the experience tuples.\n",
+    "\n",
+    "In the add_exp() function, we first check to see if the buffer is full. If it is, we eject the oldest data point before adding in the new one.\n",
+    "\n",
+    "In the prime() function, we add to the buffer randomly generated experience tuples until we a batch size worth of them. We do this as poadding for when the algorithm starts. Just in case there are not data points collected in the first episode to perform an update, we are still able to sample a full batch.\n",
+    "\n",
+    "In the sample() function, we randomly sample from the buffer batch_size data points to use in our update."
    ]
   },
   {
@@ -66,6 +89,13 @@
    ]
   },
   {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The two functions below are just to help build the neural network. As we will be using the CartPole environment in this example, the network is simple."
+   ]
+  },
+  {
    "cell_type": "code",
    "execution_count": 3,
    "metadata": {},
@@ -86,6 +116,15 @@
    "source": [
     "def build_network(dims):\n",
     "    return [get_layer(dims[i], dims[i+1]) for i in range(len(dims)-1)]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now, we have the class the builds defines our network. The part worth looking at here, is the forward() function. We run the input, X, through the network to produce the Q values. What these are, are the expected return given that we are in some state and deviate from the policy for one step by taking some action, after which we return to following the policy - this tells us what the difference is if our agent takes a different action action than what our policy dictates with the current time step. \n",
+    "\n",
+    "You will notice that forward() has the argument action with a default of None. When collecting experience, no action will be passed to the function and it will return q_values. When performing our update however, we already know the actions we want, because they are in our experience tuples. Here, we will pass them to forward() in order to get the Q values only corresponding to the actions we want (i.e. the ones we have already taken) so that we can perform our update."
    ]
   },
   {
@@ -111,6 +150,15 @@
    ]
   },
   {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "To help our agent choose actions, we will use an epsilon greedy policy. This means, that most of the time we will greedily choose the action that the highest Q value, but epsilon percent of the time, we will choose an action randomly. It is common to decay the epsilon over the duration of training, much like you would the learning rate.\n",
+    "\n",
+    "This is probably the most common way for DQN to handle the exploration vs exploitation dilema. In case you are not familiar with this concept (first I would go learn some Reinforcement Learning (RL) basics before trying to learn RL with neural networks, but I won't judge), exploration is how much our agent should look for new experience, and exploitation is how much our agent should prioritize behavior it already knows to be good (at least compared to its experience so far, which may or may not be optimal given the underlying environment dynamics); any good RL agent must find a way to balance these."
+   ]
+  },
+  {
    "cell_type": "code",
    "execution_count": 6,
    "metadata": {},
@@ -119,6 +167,35 @@
     "def epsilon_greedy(q_values, episode, epsilon=0.3):\n",
     "    r = np.random.rand()\n",
     "    return torch.argmax(q_values).item() if r > (epsilon/episode) else np.random.randint(len(q_values.tolist()))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Finally, we have the training loop. First, I will walk through the Q Learning algorithm, then I will point out something about why the algorithm does what it does and the result of doing this, and finally I will explain the changes made in order to accomodate the neural network.\n",
+    "\n",
+    "The first thing we have to do, is prime out buffer as described above. We only have to do this once for the entire run of the algorithm, because the agent will accumulate experience.\n",
+    "\n",
+    "At the start of the episode, we get a new state. We use this, to get our Q values that correspond to the value of taking action in that state. With our Q values in hand, we use the epsilon greedy policy to choose an action. We use the chosen action to step the environment forward and get the reward and next state. This next state is run through the network to get its Q values. This time, instead of using our epsilon greedy policy to choose the action, we will simply choose the action with the highest Q value. \n",
+    "\n",
+    "This is our entire experience tuple. So we add (state, action, reward, next state and next action) to our buffer. At this point, we will set the state to be what is currently the next state and repeat the experience tuple collection process. \n",
+    "\n",
+    "At the end of the episode, we will randomly sample a batch from our buffer and perform our update. Now, the Q learning update is $R + \\gamma max_{a \\in A}Q_{\\theta}(S_{t+1}, a) - Q_{\\theta}(S_{t}, A_{t})$. This is very similar to the TD error, and it intuitively tells us that the update is the difference between what happened and what we expected to happen. \n",
+    "\n",
+    "And that is the algorithm. Or at least that is the Q learning algorithm. I will explain necessary changes in a moment. First however, I want to make a note of the second term in our update, $\\gamma max_{a \\in A}Q_{\\theta}(S_{t+1}, a)$:\n",
+    "\n",
+    "$\\gamma$ is the discount factor. This tells us by how much we wish to say that future rewards are not as important as the current reward. 1 corresponds to no discount and says that we want all rewards considered equally and 0 says that only the current reward matter. The choice depends on the problem, but for toy problems such as CartPole, a value like 0.9 or 0.99 are fairly standard choices. \n",
+    "\n",
+    "The more important part of this term, is $max_{a \\in A}Q_{\\theta}(S_{t+1}, a)$. $R$ plus this term could describe a possible Q value from $S_{t}$ for a different policy. So, given a different policy, say with parameters $\\theta'$, this could be written as $Q_{\\theta'}(S_{t}, A_{t})$, which looks an awful lot like the final term of the update. It is this fact that makes Q Learning an off-policy algorithm. Rather than use the agent's behavior defining policy, epsilon greedy, to choose the action, we are using the max action. The result is that the agent is attempting the estimate the optimal policy. Cool strategy. \n",
+    "\n",
+    "This is also why we can use experience from any point in training. In RL, the state distribution underlying the agent's behavior is not stationary. As the agent learns, its probability of ending up in states changes as it action preference changes. For on-policy algorithms, where the agent is updating the same policy it is using to choose actions, that means that its policy is moving around underneath it quite a bit, so it can only use experience from its current update period. In Q Learning however, we are trying to estimate the optimal policy, which does not change. So, all data points converge toward it and will help with our updates.\n",
+    "\n",
+    "Now, for the required (not really, but they make it work better) neural network changes. Since there is a considerable amount of noise that results from using a nonlinear function approximator and, in this case, constantly comparing Q values against a changing set of Q values, we will actually want to define two neural networks rather than one. We will not train our second network, but freeze it with the weights of the first network from a given update period. While this network will be kept frozen, we will occasionally set it to match the current weights of our training network. We will use this second network as our target (i.e. the term added to the reward). By keeping its weights, and therefore Q values, largely stationary, we are able to remove some noise from our updates. Imagine trying to throw pebbles in a jar, but the jar were to move every time you threw. It would be very difficult. By keeping it still, you will get better at aiming at the jar.\n",
+    "\n",
+    "We will call the parameters of this second network $\\theta'$. This makes our update $R + \\gamma max_{a \\in A}Q_{\\theta'}(S_{t+1}, a) - Q_{\\theta}(S_{t}, A_{t})$.\n",
+    "\n",
+    "And that's it. DQN in about 130 lines."
    ]
   },
   {
@@ -178,6 +255,13 @@
     "            \n",
     "    plt.plot(returns)\n",
     "    plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "In this cell, I am just setting up the problem. Not very exciting."
    ]
   },
   {
